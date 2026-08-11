@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { supabase } from "./supabaseClient";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // BUILT-IN QUESTIONS (Software Engineering Fundamentals)
@@ -306,6 +307,13 @@ export default function App() {
   const [isDragging, setIsDragging] = useState(false);
   const fileRef = useRef(null);
 
+  // ── shared question banks (Supabase) ──
+  const [sharedBanks, setSharedBanks] = useState([]);
+  const [sharedLoading, setSharedLoading] = useState(false);
+  const [sharedError, setSharedError] = useState("");
+  const [shareStatus, setShareStatus] = useState(""); // "" | "sharing" | "shared" | "share-failed"
+  const [activeSharedId, setActiveSharedId] = useState(null);
+
   // ── setup config ──
   const [qCount, setQCount] = useState(20);
   const [timed, setTimed] = useState(true);
@@ -346,6 +354,23 @@ export default function App() {
     }, 1000);
     return () => clearInterval(tick.current);
   }, [screen, paused, timed]);
+
+  // ── fetch shared question banks from Supabase ──
+  const loadSharedBanks = useCallback(async () => {
+    if (!supabase) return;
+    setSharedLoading(true);
+    setSharedError("");
+    const { data, error } = await supabase
+      .from("question_banks")
+      .select("id, course_name, filename, questions, question_count, created_at")
+      .order("created_at", { ascending: false })
+      .limit(50);
+    if (error) setSharedError("Could not load shared question banks: " + error.message);
+    else setSharedBanks(data || []);
+    setSharedLoading(false);
+  }, []);
+
+  useEffect(() => { loadSharedBanks(); }, [loadSharedBanks]);
 
   // ── file reading ──
   const readFile = useCallback((file) => {
@@ -414,11 +439,26 @@ export default function App() {
 
   const confirmUpload = () => {
     if (!parsePreview) return;
+    const name = parsePreview.filename.replace(/\.[^.]+$/, "").replace(/[-_]/g, " ");
     setUploadedQs(parsePreview.qs);
     setUploadedName(parsePreview.filename);
     setActiveBank(parsePreview.qs);
-    setCourseName(parsePreview.filename.replace(/\.[^.]+$/, "").replace(/[-_]/g, " "));
+    setActiveSharedId(null);
+    setCourseName(name);
     setQCount(Math.min(20, parsePreview.qs.length));
+
+    // Share with everyone else automatically (open access — no login required).
+    if (supabase) {
+      setShareStatus("sharing");
+      supabase
+        .from("question_banks")
+        .insert({ course_name: name, filename: parsePreview.filename, questions: parsePreview.qs })
+        .then(({ error }) => {
+          setShareStatus(error ? "share-failed" : "shared");
+          if (!error) loadSharedBanks();
+        });
+    }
+
     setParsePreview(null);
     setSetupTab("config");
   };
@@ -427,9 +467,22 @@ export default function App() {
     setUploadedQs(null);
     setUploadedName("");
     setActiveBank(BUILTIN_QUESTIONS);
+    setActiveSharedId(null);
     setCourseName("Software Engineering Fundamentals");
     setParsePreview(null);
     setUploadError("");
+    setShareStatus("");
+  };
+
+  const loadSharedBank = (b) => {
+    setUploadedQs(b.questions);
+    setUploadedName(b.filename || b.course_name);
+    setActiveBank(b.questions);
+    setActiveSharedId(b.id);
+    setCourseName(b.course_name);
+    setQCount(Math.min(20, b.questions.length));
+    setShareStatus("");
+    setSetupTab("config");
   };
 
   // ── start exam ──
@@ -513,6 +566,41 @@ export default function App() {
           {/* ── TAB: UPLOAD ── */}
           {setupTab === "upload" && (
             <div>
+              {/* Shared question banks from other users */}
+              {supabase ? (
+                <div style={{ marginBottom: "18px" }}>
+                  <div style={{ display: "flex", alignItems: "center", marginBottom: "10px" }}>
+                    <div style={{ fontSize: "11px", color: MUT, letterSpacing: "0.13em", textTransform: "uppercase" }}>🌐 Shared By Other Users</div>
+                    <button onClick={loadSharedBanks} style={{ ...B("ghost"), marginLeft: "auto", padding: "4px 10px", fontSize: "11px" }} disabled={sharedLoading}>
+                      {sharedLoading ? "Loading…" : "↻ Refresh"}
+                    </button>
+                  </div>
+                  {sharedError && <div style={{ fontSize: "12px", color: RED, marginBottom: "8px" }}>⚠ {sharedError}</div>}
+                  {!sharedError && sharedBanks.length === 0 && !sharedLoading && (
+                    <div style={{ fontSize: "12px", color: MUT }}>No shared banks yet — be the first to upload one below.</div>
+                  )}
+                  {sharedBanks.length > 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxHeight: "220px", overflowY: "auto" }}>
+                      {sharedBanks.map(b => (
+                        <div key={b.id} style={{ display: "flex", alignItems: "center", gap: "12px", background: activeSharedId === b.id ? "rgba(76,250,128,0.06)" : "rgba(255,255,255,0.03)", border: `1px solid ${activeSharedId === b.id ? "rgba(76,250,128,0.25)" : "rgba(255,255,255,0.08)"}`, borderRadius: "9px", padding: "10px 14px" }}>
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ fontWeight: "600", fontSize: "13px", color: "#e8e0d0", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.course_name}</div>
+                            <div style={{ fontSize: "11px", color: MUT }}>{b.question_count ?? b.questions.length} questions · {new Date(b.created_at).toLocaleDateString()}</div>
+                          </div>
+                          <button onClick={() => loadSharedBank(b)} style={{ ...B(activeSharedId === b.id ? "outline" : "gold"), marginLeft: "auto", padding: "6px 14px", fontSize: "12px", whiteSpace: "nowrap" }}>
+                            {activeSharedId === b.id ? "✓ Loaded" : "Use →"}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div style={{ fontSize: "12px", color: MUT, background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "9px", padding: "12px 14px", marginBottom: "18px" }}>
+                  🌐 Shared question banks are disabled — no Supabase connection configured (set <code>REACT_APP_SUPABASE_URL</code> / <code>REACT_APP_SUPABASE_ANON_KEY</code>). Uploads below stay local to this browser only.
+                </div>
+              )}
+
               {/* Drop zone */}
               {!parsePreview && (
                 <div
@@ -544,6 +632,11 @@ export default function App() {
                   </div>
                 </div>
               )}
+
+              {/* Share status */}
+              {shareStatus === "sharing" && <div style={{ fontSize: "12px", color: MUT, marginBottom: "16px" }}>🌐 Sharing with other users…</div>}
+              {shareStatus === "shared" && <div style={{ fontSize: "12px", color: GRN, marginBottom: "16px" }}>🌐 Shared — other users will now see this bank too.</div>}
+              {shareStatus === "share-failed" && <div style={{ fontSize: "12px", color: RED, marginBottom: "16px" }}>⚠ Could not share this bank with others (it's still usable locally).</div>}
 
               {/* Parse preview */}
               {parsePreview && (
