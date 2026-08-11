@@ -306,6 +306,8 @@ export default function App() {
   const [parsePreview, setParsePreview] = useState(null); // parsed but not confirmed
   const [isDragging, setIsDragging] = useState(false);
   const fileRef = useRef(null);
+  const [showBuiltinList, setShowBuiltinList] = useState(false);
+  const [expandedBankIds, setExpandedBankIds] = useState(() => new Set());
 
   // ── shared question banks (Supabase) ──
   const [sharedBanks, setSharedBanks] = useState([]);
@@ -373,7 +375,9 @@ export default function App() {
   useEffect(() => { loadSharedBanks(); }, [loadSharedBanks]);
 
   // ── file reading ──
-  const readFile = useCallback((file) => {
+  // Uses Blob.text()/Blob.arrayBuffer() (Promise-based) instead of FileReader,
+  // since FileReader isn't available in some restricted webview environments.
+  const readFile = useCallback(async (file) => {
     setUploadError("");
     setParsePreview(null);
     if (!file) return;
@@ -387,46 +391,43 @@ export default function App() {
       return;
     }
 
-    const reader = new FileReader();
-
     if (isTxt) {
-      reader.onload = (e) => {
-        const text = e.target.result;
+      try {
+        const text = await file.text();
         const parsed = parseQuestions(text);
         if (parsed.length === 0) {
           setUploadError("No questions found. Make sure your file follows the expected format (see guide below).");
         } else {
           setParsePreview({ qs: parsed, filename: file.name });
         }
-      };
-      reader.readAsText(file);
+      } catch {
+        setUploadError("Failed to read file. Please try again.");
+      }
     } else if (isPdf) {
-      // For PDF: read as text via FileReader (works for text-based PDFs only)
+      // For PDF: read as text (works for text-based PDFs only)
       // We use a simple approach: read as ArrayBuffer and extract text-like content
-      reader.onload = (e) => {
-        try {
-          const bytes = new Uint8Array(e.target.result);
-          // Extract readable ASCII text from PDF bytes
-          let rawText = "";
-          for (let i = 0; i < bytes.length; i++) {
-            const c = bytes[i];
-            if (c >= 32 && c <= 126) rawText += String.fromCharCode(c);
-            else if (c === 10 || c === 13) rawText += "\n";
-          }
-          // PDF text is often fragmented; try to reassemble lines
-          const lines = rawText.split("\n").map(l => l.trim()).filter(l => l.length > 2);
-          const joined = lines.join("\n");
-          const parsed = parseQuestions(joined);
-          if (parsed.length === 0) {
-            setUploadError("Could not extract questions from this PDF. For best results use a .txt file. If the PDF is text-based, try copying its content into a .txt file.");
-          } else {
-            setParsePreview({ qs: parsed, filename: file.name });
-          }
-        } catch {
-          setUploadError("Failed to read PDF. Please try a .txt file instead.");
+      try {
+        const buffer = await file.arrayBuffer();
+        const bytes = new Uint8Array(buffer);
+        // Extract readable ASCII text from PDF bytes
+        let rawText = "";
+        for (let i = 0; i < bytes.length; i++) {
+          const c = bytes[i];
+          if (c >= 32 && c <= 126) rawText += String.fromCharCode(c);
+          else if (c === 10 || c === 13) rawText += "\n";
         }
-      };
-      reader.readAsArrayBuffer(file);
+        // PDF text is often fragmented; try to reassemble lines
+        const lines = rawText.split("\n").map(l => l.trim()).filter(l => l.length > 2);
+        const joined = lines.join("\n");
+        const parsed = parseQuestions(joined);
+        if (parsed.length === 0) {
+          setUploadError("Could not extract questions from this PDF. For best results use a .txt file. If the PDF is text-based, try copying its content into a .txt file.");
+        } else {
+          setParsePreview({ qs: parsed, filename: file.name });
+        }
+      } catch {
+        setUploadError("Failed to read PDF. Please try a .txt file instead.");
+      }
     }
   }, []);
 
@@ -484,6 +485,20 @@ export default function App() {
     setShareStatus("");
     setSetupTab("config");
   };
+
+  const toggleBankExpanded = (id) => {
+    setExpandedBankIds(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  // Every uploaded exam/course available to browse: the shared list from
+  // Supabase when configured, or just the locally-loaded one otherwise.
+  const allUploadedBanks = supabase
+    ? sharedBanks
+    : (uploadedQs ? [{ id: "local", course_name: courseName, filename: uploadedName, questions: uploadedQs, question_count: uploadedQs.length, created_at: null }] : []);
 
   // ── start exam ──
   const startExam = () => {
@@ -549,7 +564,7 @@ export default function App() {
           {/* ── TAB: BUILT-IN ── */}
           {setupTab === "builtin" && (
             <div>
-              <div style={{ display: "flex", alignItems: "center", gap: "14px", background: "rgba(201,168,76,0.06)", border: "1px solid rgba(201,168,76,0.18)", borderRadius: "10px", padding: "16px 18px", marginBottom: "18px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "14px", background: "rgba(201,168,76,0.06)", border: "1px solid rgba(201,168,76,0.18)", borderRadius: "10px", padding: "16px 18px", marginBottom: "12px" }}>
                 <div style={{ fontSize: "36px" }}>📘</div>
                 <div>
                   <div style={{ fontWeight: "700", fontSize: "15px", color: G }}>Software Engineering Fundamentals</div>
@@ -557,8 +572,71 @@ export default function App() {
                 </div>
                 <button onClick={() => { clearUpload(); setSetupTab("config"); }} style={{ ...B("gold"), marginLeft: "auto", whiteSpace: "nowrap" }}>Use This →</button>
               </div>
-              <div style={{ fontSize: "13px", color: "#8aabbf", lineHeight: "1.7" }}>
+              <div style={{ fontSize: "13px", color: "#8aabbf", lineHeight: "1.7", marginBottom: "14px" }}>
                 This is the built-in question bank covering software process models (Waterfall, V-model, Agile), requirements engineering, feasibility studies, effort estimation, UML/software modeling, OOP principles, and software maintenance.
+              </div>
+
+              <button onClick={() => setShowBuiltinList(s => !s)} style={{ ...B("ghost"), width: "100%", justifyContent: "space-between", marginBottom: showBuiltinList ? "10px" : "0" }}>
+                <span>📋 {showBuiltinList ? "Hide" : "View"} all {BUILTIN_QUESTIONS.length} questions</span>
+                <span>{showBuiltinList ? "▲" : "▼"}</span>
+              </button>
+              {showBuiltinList && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxHeight: "340px", overflowY: "auto", marginBottom: "18px", paddingRight: "4px" }}>
+                  {BUILTIN_QUESTIONS.map((q, i) => (
+                    <div key={i} style={{ background: "rgba(0,0,0,0.2)", borderRadius: "8px", padding: "10px 12px", fontSize: "13px" }}>
+                      <div style={{ color: "#ccd", marginBottom: "4px" }}><strong style={{ color: G }}>Q{i + 1}.</strong> {q.question}</div>
+                      <div style={{ color: MUT }}>{q.options.map((o, j) => `${LABELS[j]}) ${o}`).join(" · ")}</div>
+                      <div style={{ color: GRN, marginTop: "3px", fontSize: "11px" }}>Answer: {LABELS[q.answer]}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* All uploaded exams / courses, listed alongside the built-in one */}
+              <div style={{ marginTop: "18px" }}>
+                <div style={{ fontSize: "11px", color: MUT, letterSpacing: "0.13em", textTransform: "uppercase", marginBottom: "10px" }}>
+                  📂 Uploaded Exams / Courses {!supabase && "(this browser only)"}
+                </div>
+                {allUploadedBanks.length === 0 && (
+                  <div style={{ fontSize: "12px", color: MUT }}>No exams uploaded yet — upload one in the "Upload Questions" tab.</div>
+                )}
+                {allUploadedBanks.length > 0 && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                    {allUploadedBanks.map(b => {
+                      const expanded = expandedBankIds.has(b.id);
+                      return (
+                        <div key={b.id} style={{ background: "rgba(76,250,128,0.05)", border: `1px solid ${activeSharedId === b.id ? "rgba(76,250,128,0.35)" : "rgba(76,250,128,0.15)"}`, borderRadius: "10px", padding: "12px 14px" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                            <div style={{ fontSize: "22px" }}>📂</div>
+                            <div style={{ minWidth: 0 }}>
+                              <div style={{ fontWeight: "600", fontSize: "14px", color: "#e8e0d0", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.course_name}</div>
+                              <div style={{ fontSize: "11px", color: MUT }}>
+                                {b.question_count ?? b.questions.length} questions{b.created_at ? ` · ${new Date(b.created_at).toLocaleDateString()}` : ""}
+                              </div>
+                            </div>
+                            <button onClick={() => toggleBankExpanded(b.id)} style={{ ...B("ghost"), marginLeft: "auto", padding: "6px 10px", fontSize: "12px" }}>
+                              {expanded ? "▲ Hide" : "▼ View"}
+                            </button>
+                            <button onClick={() => loadSharedBank(b)} style={{ ...B(activeSharedId === b.id ? "outline" : "gold"), padding: "6px 14px", fontSize: "12px", whiteSpace: "nowrap" }}>
+                              {activeSharedId === b.id ? "✓ Loaded" : "Use →"}
+                            </button>
+                          </div>
+                          {expanded && (
+                            <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxHeight: "340px", overflowY: "auto", marginTop: "12px", paddingRight: "4px" }}>
+                              {b.questions.map((q, i) => (
+                                <div key={i} style={{ background: "rgba(0,0,0,0.2)", borderRadius: "8px", padding: "10px 12px", fontSize: "13px" }}>
+                                  <div style={{ color: "#ccd", marginBottom: "4px" }}><strong style={{ color: G }}>Q{i + 1}.</strong> {q.question}</div>
+                                  <div style={{ color: MUT }}>{q.options.map((o, j) => `${LABELS[j]}) ${o}`).join(" · ")}</div>
+                                  <div style={{ color: GRN, marginTop: "3px", fontSize: "11px" }}>Answer: {LABELS[q.answer]}</div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </div>
           )}
